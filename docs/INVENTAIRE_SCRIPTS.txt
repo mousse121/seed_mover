@@ -1,8 +1,9 @@
-scripts/daily_qbittorrent_update_v1.32c_synomap.sh
-scripts/radarr_postprocess_v1.32_fix_append.sh
-scripts/sonarr_postprocess_v1.32_fix_append.sh
-scripts/synomap_apply_from_plan_v1.2.6.sh
-scripts/synomap_apply_from_plan_v1.6.9_sequential.sh
-scripts/synomap_chain_preview_v1.0.sh
-scripts/synomap_cleanup_omv_only_v1.0.sh
-scripts/synomap_prune_mapping_write_v1.1.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/daily_qbittorrent_update_v1.32c_synomap.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/radarr_postprocess_v1.32_fix_append.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/sonarr_postprocess_v1.32_fix_append.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/synomap_apply_from_plan_v1.2.6.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/synomap_apply_from_plan_v1.6.9_sequential.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/synomap_chain_preview_v1.0.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/synomap_cleanup_omv_only_v1.0.sh
+https://raw.githubusercontent.com/mousse121/seed_mover/refs/heads/main/scripts/synomap_prune_mapping_write_v1.1.sh
+
