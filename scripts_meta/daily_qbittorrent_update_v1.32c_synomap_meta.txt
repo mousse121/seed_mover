@@ -1,62 +1,72 @@
-diff --git a/scripts_meta/daily_qbittorrent_update_v1.32c_synomap_meta.txt b/scripts_meta/daily_qbittorrent_update_v1.32c_synomap_meta.txt
-new file mode 100644
-index 0000000000000000000000000000000000000000..874d6412feba19e37608cd79d5b9d51df5baaad1
---- /dev/null
-+++ b/scripts_meta/daily_qbittorrent_update_v1.32c_synomap_meta.txt
-@@ -0,0 +1,56 @@
-+[ID]
-+SCRIPT_NAME: daily_qbittorrent_update_v1.32c_synomap.sh
-+PROJECT: SEED_MOVER
-+
-+[ROLE]
-+But métier (en 2–3 phrases max) :
-+- Automatise la finalisation quotidienne des torrents achevés dans qBittorrent en les filtrant par catégories approuvées et par ancienneté.
-+- Pour chaque entrée valide, crée ou rafraîchit un hardlink vers l'arborescence Synology cible, repositionne la sauvegarde qBittorrent, puis marque le torrent avec le tag SYNO pour suivi.
-+
-+[CONTEXT]
-+- Hypothèse : exécuté via une tâche cron quotidienne sur le serveur hébergeant qBittorrent et l'arborescence Synology montée localement.
-+- Lancement typique : script shell autonome (`/scripts/daily_qbittorrent_update_v1.32c_synomap.sh [options]`), souvent appelé sans arguments ou via un wrapper cron/systemd timer.
-+- Lit le fichier de configuration `synomap.env` (chemin par défaut défini dans SYNO_ENV) pour charger QB_URL/QB_USER/QB_PASS et autres variables.
-+- Consomme le fichier de mapping `MAP_FILE` (par défaut `/data/scripts/mapping_entries.txt`) contenant les colonnes séparées par `|` (identifiant, chemin source, chemin destination).
-+- N'écrit rien dans le fichier de mapping ; il crée des répertoires sous `DEST_ROOT` et génère des hardlinks dans `DEST_ROOT/<cat>/<nom_top>`. Interaction avec qBittorrent via API HTTP en utilisant les variables d’environnement QB_URL/QB_USER/QB_PASS.
-+
-+[INPUTS]
-+- Paramètres CLI :
-+  - `--allow "cat1 cat2"` : liste d'espaces des catégories qBittorrent autorisées (défaut `sonarr radarr`).
-+  - `--min-age SEC` : âge minimum depuis la complétion ou l'ajout (en secondes) avant traitement (défaut 259200 = 3 jours).
-+  - `--dest-root PATH` : racine des liens Synology (défaut `/syno/torrents/completed`).
-+  - `--limit N` : arrête après N torrents admissibles (0 = illimité).
-+  - `--map-file PATH` : fichier de mapping SRC→DST.
-+  - `--write` : sans cette option, le script reste en mode dry-run (affiche le plan mais ne crée rien).
-+  - `--yes` : indicateur accepté mais non utilisé dans cette version (prévu pour confirmation automatique).
-+- Variables d’environnement :
-+  - `SYNO_ENV` : chemin d'un fichier `.env` chargé en amont pour définir QB_URL/QB_USER/QB_PASS et éventuellement d'autres paramètres.
-+  - `QB_URL`, `QB_USER`, `QB_PASS` : credentials/API endpoint de qBittorrent (obligatoires, sinon arrêt immédiat).
-+  - `ALLOW`, `MIN_AGE`, `DEST_ROOT`, `LIMIT`, `MAP_FILE` peuvent aussi être définies dans l'environnement pour surcharger les valeurs par défaut.
-+- Contraintes d'entrée :
-+  - `mapping_entries.txt` doit être un fichier texte avec séparateur `|` où la deuxième colonne correspond au chemin source absolu (tel que qBittorrent rapporte) et la troisième au chemin destination final.
-+  - Le montage Synology et les chemins `DEST_ROOT`/`DST` doivent résider sur le même device pour autoriser les hardlinks.
-+
-+[OUTPUTS]
-+- Fichiers : création des répertoires `DEST_ROOT/<cat>` (si `--write`) et des hardlinks individuels `DEST_ROOT/<cat>/<top_file>` pointant vers le chemin `DST` issu du mapping.
-+- Actions qBittorrent :
-+  - Déplacement de l'emplacement de sauvegarde (`torrents/setLocation`) vers `DEST_ROOT/<cat>`.
-+  - Ajout du tag `SYNO` au torrent traité.
-+  - Lancement d'un recheck si un nouveau lien a été posé.
-+- Journaux : sortie standard détaillant les torrents inspectés, les raisons de skip (`SKIP:category`, `SKIP:age`, etc.) et les opérations de lien.
-+
-+[FAILURE_MODES]
-+- Variables qBittorrent manquantes (QB_URL/QB_USER/QB_PASS) → arrêt immédiat avec message `[ERROR] ... not set` et exit code ≠ 0.
-+- Fichier de mapping absent ou introuvable → arrêt (`MAP_FILE not found`).
-+- Échec d’authentification qBittorrent → message `qB login failed` et terminaison.
-+- Absence de timestamp valide (ni `completion_on` ni `added_on`) → torrent ignoré (`SKIP:no_time`).
-+- Torrents trop récents → ignorés (`SKIP:age`).
-+- Catégorie non autorisée → ignorée (`SKIP:category`).
-+- Fichier TOP introuvable ou mapping manquant → lignes `[MAPMISS]` et aucun lien créé.
-+- Volumes source/destination sur devices différents → `[CROSS-DEV]` (impossibilité de hardlink) et torrent sauté.
-+- Échec `stat` sur chemins destinés → `[NOSTAT]` et skip.
-+- Si les opérations qBittorrent (setLocation, addTags, recheck) échouent, l'erreur n'est pas contrôlée mais se reflète dans les logs `curl` si exécuté en mode verbeux ; le script continue généralement.
-+
-+[HISTORIQUE]
-+- 2025-??-?? : Création/ajustement de la version v1.32c basée sur le script historique daily_qbittorrent_update (date précise à confirmer).
-+- v1.31 (2025-11-10) → v1.32c : À COMPLÉTER.
+[ID]
+SCRIPT_NAME: daily_qbittorrent_update_v1.32c_synomap.sh
+PROJECT: SEED_MOVER
+
+[ROLE]
+But métier (en 2–3 phrases max) :
+- Automatise la finalisation quotidienne des torrents achevés dans qBittorrent en les filtrant par catégories approuvées et par ancienneté.
+- Pour chaque torrent admissible, crée ou rafraîchit un hardlink vers l’arborescence Synology montée localement, repositionne la sauvegarde qBittorrent, puis applique le tag SYNO dans qBittorrent pour marquer qu’il est traité.
+
+[CONTEXT]
+- Environnement cible : serveur OMV hébergeant qBittorrent, avec l'arborescence Synology montée sous /syno/... via NFS/SMB.
+- Localisation habituelle du script : /srv/dev-disk-by-uuid-.../data/scripts (selon déploiement).
+- Dépendances système : shell POSIX (/bin/sh), curl, jq, utilitaires classiques Linux (stat, ln, mkdir).
+- Hypothèse d’utilisation : exécuté via tâche cron quotidienne ou via un orchestrateur externe (wrapper .sh ou systemd timer).
+- Lit le fichier d’environnement SYNO_ENV (par défaut synomap.env) pour charger QB_URL, QB_USER, QB_PASS et autres paramètres.
+- Consomme le fichier de mapping MAP_FILE (par défaut /data/scripts/mapping_entries.txt) contenant des lignes séparées par “|” (ID | SRC | DST).
+- N’écrit pas dans le fichier de mapping : le script crée des répertoires sous DEST_ROOT et génère des hardlinks, puis pilote qBittorrent via API HTTP.
+
+[INPUTS]
+- Paramètres CLI :
+  - --allow "cat1 cat2" : liste d’espaces des catégories autorisées (défaut : "sonarr radarr").
+  - --min-age SEC : âge minimal (en secondes) depuis completion_on ou added_on (défaut : 259200 = 3 jours).
+  - --dest-root PATH : racine cible des hardlinks (défaut : /syno/torrents/completed).
+  - --limit N : traite au maximum N torrents admissibles (0 = illimité).
+  - --map-file PATH : fichier de mapping SRC→DST.
+  - --write : en son absence, le script opère strictement en mode dry-run (aucune création de répertoires, aucun hardlink).
+  - --yes : indicateur reconnu mais non utilisé dans cette version.
+- Variables d’environnement :
+  - SYNO_ENV : chemin vers un .env contenant QB_URL, QB_USER, QB_PASS, etc.
+  - QB_URL, QB_USER, QB_PASS : endpoint et credentials qBittorrent (obligatoires).
+  - ALLOW, MIN_AGE, DEST_ROOT, LIMIT, MAP_FILE : surcharges possibles des valeurs par défaut.
+- Priorité de résolution :
+  1. Options CLI (priorité la plus forte)
+  2. Variables d’environnement
+  3. Valeurs par défaut internes du script
+- Contraintes :
+  - mapping_entries.txt doit contenir des chemins absolus cohérents avec ceux renvoyés par qBittorrent.
+  - Les chemins source et DEST_ROOT doivent résider sur le même device pour autoriser les hardlinks (ln).
+
+[OUTPUTS]
+- Fichiers et répertoires :
+  - Création éventuelle de DEST_ROOT/<cat> (si --write).
+  - Hardlinks sous DEST_ROOT/<cat>/<top_file> pointant vers la destination calculée.
+- Actions qBittorrent (si --write) :
+  - Déplacement du save_path (API torrents/setLocation).
+  - Ajout du tag SYNO.
+  - Recheck automatique si un nouveau lien est posé.
+- Journaux :
+  - Le script n’écrit aucun fichier log. Toute la journalisation passe par stdout.
+  - Les préfixes SKIP:*, MAPMISS, CROSS-DEV, etc. facilitent l’analyse via syslog/cron.
+
+[FAILURE_MODES]
+- QB_URL / QB_USER / QB_PASS absents → erreur immédiate, message explicite et exit code ≠ 0.
+- MAP_FILE introuvable → arrêt (“MAP_FILE not found”) avec exit code ≠ 0.
+- Échec d’authentification qBittorrent → erreur “qB login failed”, exit code ≠ 0.
+- Absence de timestamps (completion_on / added_on) → torrent ignoré (SKIP:no_time).
+- Torrents trop récents → SKIP:age.
+- Catégorie non autorisée → SKIP:category.
+- Chemin TOP introuvable ou mapping absent → MAPMISS.
+- Volumes source/destination différents → CROSS-DEV (hardlink impossible) → torrent ignoré.
+- Échec stat sur les chemins → NOSTAT.
+- Erreurs API qBittorrent (setLocation/addTags/recheck) :
+  - Non gérées explicitement ; elles apparaissent via curl si verbeux.
+  - Le script continue en mode “best effort”.
+- Exit codes :
+  - Exit ≠ 0 pour les erreurs bloquantes (env manquante, mapping absent, login KO).
+  - Exit = 0 même si certains torrents sont ignorés (skip contrôlé).
+
+[HISTORIQUE]
+- 2025-??-?? : Création/ajustement de la version v1.32c (issue du script historique daily_qbittorrent_update).
+- v1.31 (2025-11-10) → v1.32c : refactor mineur ; détails à compléter via historique Git.
+- À COMPLÉTER : compléter les dates et changements précis lorsque le repo disposera d’un historique Git plus complet.
