@@ -67,6 +67,8 @@ fi
 : "${QB_URL:?env QB_URL missing}"
 : "${QB_USER:?env QB_USER missing}"
 : "${QB_PASS:?env QB_PASS missing}"
+MAP_FILE="${MAP_FILE:-/data/scripts/mapping_entries.txt}"
+[ -f "$MAP_FILE" ] || die "mapping file not found: $MAP_FILE"
 
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 need curl; need jq; need sed; need awk; need ln; need mkdir; need stat; need tr; need nl; need cp; need mount; need umount; need mountpoint
@@ -77,6 +79,7 @@ HASHES=$(mktemp "$TMPDIR_ROOT/synomap_hashes.XXXXXX")
 PAIRS=$(mktemp "$TMPDIR_ROOT/synomap_pairs.XXXXXX")
 ITEMS=$(mktemp "$TMPDIR_ROOT/synomap_items.XXXXXX")
 COOKIE=$(mktemp "$TMPDIR_ROOT/synomap_cookie.XXXXXX")
+CAT_CACHE_DIR=$(mktemp -d "$TMPDIR_ROOT/synomap_cat_cache.XXXXXX") || die "unable to create category cache"
 ACTIVE_BIND=""
 
 cleanup() {
@@ -84,6 +87,7 @@ cleanup() {
     umount "$ACTIVE_BIND" 2>/dev/null || true
   fi
   rm -f "$RAW" "$HASHES" "$PAIRS" "$ITEMS" "$COOKIE"
+  [ -d "$CAT_CACHE_DIR" ] && rm -rf "$CAT_CACHE_DIR"
 }
 trap cleanup EXIT INT TERM
 
@@ -230,60 +234,148 @@ set_sidecars_prio() {
   log "sidecars: priority=$prio on $idxs"
 }
 
-infer_hash() {
-  dst="$1"
-  dir=$(dirname -- "$dst")
-  base=$(basename -- "$dst")
-  base_noext=$(printf '%s' "$base" | sed 's/\.[^.]*$//')
-  folder=$(basename -- "$dir")
-  cat=""
-  echo "$dst" | grep -qi "/radarr/" && cat="radarr"
-  echo "$dst" | grep -qi "/sonarr/" && cat="sonarr"
-  if [ -n "$cat" ]; then
-    if ac=$(qb_info_cat "$cat" || true); then
-      H2=$(printf '%s' "$ac" | jq -r --arg b "$base_noext" --arg f "$folder" '
-        .[]
-        | select(.name != null)
-        | select(
-            ((($b|length)>0) and (.name|test($b;"i")))
-            or ((($f|length)>0) and (.name|test($f;"i")))
-          )
-        | .hash
-      ' 2>/dev/null | head -n 1)
-      if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_category"; return 0; fi
+normalize_dir_path() {
+  p="$1"
+  [ -n "$p" ] || { echo ""; return 1; }
+  while [ "$p" != "/" ] && [ "${p%/}" != "$p" ]; do
+    p=${p%/}
+  done
+  [ -n "$p" ] || p="/"
+  printf '%s\n' "$p"
+}
+
+lower_ascii() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+strip_extension() {
+  n="$1"
+  case "$n" in
+    *.*) printf '%s\n' "${n%.*}" ;;
+    *) printf '%s\n' "$n" ;;
+  esac
+}
+
+detect_category_from_dst() {
+  d="$1"
+  dir=$(dirname -- "$d")
+  parent=$(dirname -- "$dir")
+  base=$(basename -- "$dir")
+  case "$parent" in
+    */torrents/completed|*/torrents/completed) printf '%s\n' "$base" ;;
+    *) echo "" ;;
+  esac
+}
+
+get_cat_json() {
+  cname="$1"
+  [ -n "$cname" ] || return 1
+  safe=$(printf '%s' "$cname" | tr -c 'A-Za-z0-9._-' '_')
+  cache_file="$CAT_CACHE_DIR/$safe.json"
+  if [ -f "$cache_file" ]; then
+    cat "$cache_file"
+    return 0
+  fi
+  data=$(qb_info_cat "$cname" || true)
+  [ -n "$data" ] || return 1
+  printf '%s' "$data" > "$cache_file"
+  printf '%s' "$data"
+  return 0
+}
+
+resolve_hash_for_plan_entry() {
+  hint_hash="$1"
+  src="$2"
+  dst="$3"
+
+  [ -n "$src" ] || { log "WARN no_hash_for DST=$dst reason=missing_src"; return 1; }
+
+  lookup=$(awk -F'|' -v target="$src" '
+    $3==target { c++; if (c==1) line=$0 }
+    END {
+      if (c==0) { printf "0|" }
+      else { printf "%d|%s\n", c, line }
+    }
+  ' "$MAP_FILE" || true)
+  count=$(printf '%s\n' "$lookup" | cut -d'|' -f1 | tr -d '[:space:]')
+  line=$(printf '%s\n' "$lookup" | cut -d'|' -f2-)
+
+  case "$count" in
+    1) : ;;
+    0|"") log "WARN no_hash_for DST=$dst reason=mapping_not_found"; return 1 ;;
+    *) log "WARN no_hash_for DST=$dst reason=mapping_ambiguous count=$count"; return 1 ;;
+  esac
+
+  data_path=$(printf '%s\n' "$line" | awk -F'|' '{print $2}')
+  [ -n "$data_path" ] || { log "WARN no_hash_for DST=$dst reason=mapping_missing_data_path"; return 1; }
+
+  data_dir=$(dirname -- "$data_path")
+  data_name=$(basename -- "$data_path")
+  data_dir_norm=$(normalize_dir_path "$data_dir")
+  data_name_lower=$(lower_ascii "$data_name")
+  data_name_noext_lower=$(lower_ascii "$(strip_extension "$data_name")")
+
+  cat=$(detect_category_from_dst "$dst")
+  [ -n "$cat" ] || { log "WARN no_hash_for DST=$dst reason=unknown_category"; return 1; }
+
+  if [ -n "$hint_hash" ]; then
+    info=$(qb_info_json "$hint_hash" || true)
+    if [ -n "$info" ]; then
+      hint_name=$(get_info_field "$info" '.[0].name')
+      hint_save=$(get_info_field "$info" '.[0].save_path')
+      hint_hash_live=$(get_info_field "$info" '.[0].hash')
+      if [ -n "$hint_name" ] && [ -n "$hint_save" ] && [ -n "$hint_hash_live" ]; then
+        hint_save_norm=$(normalize_dir_path "$hint_save" 2>/dev/null || echo "")
+        hint_name_lower=$(lower_ascii "$hint_name")
+        if [ "$hint_save_norm" = "$data_dir_norm" ] && [ "$hint_name_lower" = "$data_name_lower" ]; then
+          log "hash_resolved hash=$hint_hash via=plan_hint cat=$cat data_path=$data_path save_path=$hint_save name=$hint_name"
+          printf '%s\n' "$hint_hash"
+          return 0
+        else
+          log "hash_hint_rejected hash=$hint_hash reason=hint_mismatch expected_dir=$data_dir_norm got_dir=$hint_save_norm expected_name=$data_name got_name=$hint_name"
+        fi
+      else
+        log "hash_hint_rejected hash=$hint_hash reason=hint_info_incomplete"
+      fi
+    else
+      log "hash_hint_rejected hash=$hint_hash reason=hint_not_found"
     fi
   fi
-  all=""
-  if all=$(qb_info_all || true); then
-    H2=$(printf '%s' "$all" | jq -r --arg b "$base_noext" --arg f "$folder" '
-      .[]
-      | select(.name != null)
-      | select(
-          ((($b|length)>0) and (.name|test($b;"i")))
-          or ((($f|length)>0) and (.name|test($f;"i")))
-        )
-      | .hash
-    ' 2>/dev/null | head -n 1)
-    if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_name"; return 0; fi
-    H2=$(printf '%s' "$all" | jq -r --arg d "$dir" --arg b "$base_noext" --arg f "$folder" '
-      .[]
-      | select(
-          (.content_path != null and ((.content_path|startswith($d+"/")) or .content_path==$d))
-          or (.save_path != null and ((.save_path|startswith($d+"/")) or .save_path==$d))
-        )
-      | select(
-          (.name != null)
-          and (
-            ((($b|length)>0) and (.name|test($b;"i")))
-            or ((($f|length)>0) and (.name|test($f;"i")))
-          )
-        )
-      | .hash
-    ' 2>/dev/null | head -n 1)
-    if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_path"; return 0; fi
+
+  cat_json=$(get_cat_json "$cat" || true)
+  [ -n "$cat_json" ] || { log "WARN no_hash_for DST=$dst reason=category_fetch_failed"; return 1; }
+
+  matches=$(printf '%s' "$cat_json" | jq -r --arg save "$data_dir_norm" --arg name_l "$data_name_lower" --arg name_noext "$data_name_noext_lower" '
+    .[]
+    | select(.save_path != null and .name != null and .hash != null)
+    | (.save_path | gsub("/+$$";"")) as $sp
+    | select($sp == $save)
+    | (.name | ascii_downcase) as $n
+    | (.name | sub("\\.[^.]*$";"") | ascii_downcase) as $n_noext
+    | select($n == $name_l or $n_noext == $name_noext)
+    | [ .hash, .name, .save_path ]
+    | @tsv
+  ' 2>/dev/null || true)
+
+  matches_clean=$(printf '%s\n' "$matches" | sed '/^[[:space:]]*$/d')
+  if [ -z "$matches_clean" ]; then
+    log "WARN no_hash_for DST=$dst reason=no_match_in_category"
+    return 1
   fi
-  echo "|"
-  return 1
+
+  match_count=$(printf '%s\n' "$matches_clean" | wc -l | awk '{print $1}')
+  if [ "$match_count" -ne 1 ]; then
+    log "WARN hash_ambiguous_for DST=$dst candidates=$match_count"
+    return 1
+  fi
+
+  first_match=$(printf '%s\n' "$matches_clean" | head -n 1)
+  match_hash=$(printf '%s' "$first_match" | cut -f1)
+  match_name=$(printf '%s' "$first_match" | cut -f2)
+  match_save=$(printf '%s' "$first_match" | cut -f3)
+  log "hash_resolved hash=$match_hash via=category_lookup cat=$cat data_path=$data_path save_path=$match_save name=$match_name"
+  printf '%s\n' "$match_hash"
+  return 0
 }
 
 qb_login
@@ -312,17 +404,12 @@ while IFS='|' read -r HASH SRC DST; do
   [ -n "${SRC:-}" ] && [ -n "${DST:-}" ] || continue
   ITEM_COUNT=$((ITEM_COUNT+1))
 
-  if [ -z "${HASH:-}" ]; then
-    ih=$(infer_hash "$DST" || true)
-    HASH=$(printf '%s' "$ih" | cut -d'|' -f1)
-    HOW=$(printf '%s' "$ih" | cut -d'|' -f2-)
-    if [ -n "$HASH" ]; then
-      [ "$DEBUG" -eq 1 ] && log "debug: hash inferred $HASH via $HOW"
-    else
-      log "WARN: no hash for DST=$DST -> skip"
-      continue
-    fi
+  resolved=$(resolve_hash_for_plan_entry "${HASH:-}" "$SRC" "$DST" || true)
+  if [ -z "$resolved" ]; then
+    log "skip: unresolved hash for DST=$DST"
+    continue
   fi
+  HASH="$resolved"
 
   DEST_DIR=$(dirname -- "$DST")
   log "=== $HASH ==="
