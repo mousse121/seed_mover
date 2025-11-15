@@ -67,3 +67,8 @@ PROJECT: SEED_MOVER
   sur des heuristiques de chemin qu’en tout dernier ressort tout en vérifiant le nom. Cette hiérarchie évite des mauvais
   rattachements comme le cas réel « Mickey » pris à la place de « Scream » parce que le save_path semblait déjà correct dans
   /syno/.../radarr. Résultat : beaucoup moins de risques de déplacer/rechecker le mauvais torrent lors d’un setLocation.
+
+CHANGES 2025-11-15
+Improve Synomap hash resolution
+require the mapping file and cache category data per run
+add a deterministic resolver and integrate it into the apply loop
