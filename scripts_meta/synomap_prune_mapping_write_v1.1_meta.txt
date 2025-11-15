@@ -3,43 +3,98 @@ SCRIPT_NAME: synomap_prune_mapping_write_v1.1.sh
 PROJECT: SEED_MOVER
 
 [ROLE]
-- Nettoyeur du fichier mapping_entries : filtre les lignes déjà migrées (hardlink validé entre source Synology et destination finale) afin de produire une version allégée du mapping.
-- En mode WRITE/--in-place, remplace le fichier existant après sauvegarde ; sinon génère un fichier cleaned pour inspection ou diffusion.
+- Maintenance du fichier mapping_entries.txt.
+- Identifie et filtre les lignes dont la migration est entièrement validée :
+    • hardlink effectif entre SRC et DST,
+    • fichiers présents sur un même device, inode cohérent,
+    • ligne catégorisée comme SONARR ou RADARR (ou équivalent).
+- Produit un mapping "nettoyé" conservant uniquement :
+    • les entrées non migrées,
+    • les entrées incomplètes,
+    • les lignes non éligibles au pruning.
+- Peut fonctionner en écriture réelle (avec backups) ou en mode preview.
 
 [CONTEXT]
-- À lancer sur le serveur qui héberge mapping_entries.txt (typiquement OMV) avec accès aux deux arborescences /syno/... et /data/... pour vérifier les inodes.
-- Dépendances : /bin/sh, mkdir, cp, mv, stat, tr, date, sed, awk optionnel (mais le script n’en dépend pas explicitement), et utilitaires POSIX (printf, cut).
-- Charge SYNO_ENV (synomap.env) pour récupérer MAP_FILE, ALLOW (catégories autorisées) ou d’autres paramètres.
-- N’a aucune interaction réseau : il inspecte le filesystem local uniquement.
+- À exécuter sur OMV ou tout hôte disposant d’un accès direct :
+    • aux sources locales (ex. /srv/dev-disk-by-uuid-...),
+    • aux destinations Synology (ex. /syno/...).
+- Dépendances minimales : /bin/sh, mkdir, cp, mv, stat, tr, date, cut, sed.
+- awk facultatif pour certains environnements, mais le script repose surtout
+  sur stat / sed / cut.
+- Charge SYNO_ENV (synomap.env) pour récupérer MAP_FILE, ALLOW et autres
+  paramètres globaux du pipeline.
+- Ne contacte aucun service externe : opération 100 % filesystem.
 
 [INPUTS]
 - Options CLI :
-  - --input PATH : mapping source (défaut MAP_FILE issu du .env).
-  - --output PATH : fichier cleaned à écrire (défaut mapping_entries.cleaned.txt à côté du fichier source).
-  - --in-place : remplace directement le mapping source (impose la création d’un backup sous backup/mapping_entries/).
-  - --write : autorise l’écriture ; sans cette option le script s’arrête après le résumé PREVIEW.
-  - --yes : confirmation obligatoire lorsqu’on combine --write (sécurité).
-  - --help : affiche l’aide.
+  - --input PATH        : mapping source (défaut = MAP_FILE du .env).
+  - --output PATH       : destination cleaned (défaut mapping_entries.cleaned.txt).
+  - --in-place          : remplace le mapping source (avec backup auto).
+  - --write             : autorise l’écriture dans OUT_FILE ou MAP_FILE.
+  - --yes               : confirmation obligatoire si --write est activé.
+  - --help              : affiche l’aide intégrée et quitte.
+
 - Variables d’environnement :
-  - SYNO_ENV pour charger MAP_FILE, ALLOW, etc.
-  - MAP_FILE, ALLOW peuvent être définis avant l’exécution ; les options CLI priment.
-- Fichier de mapping attendu : lignes au format ORIG|SRC|DST (avec commentaires ou lignes vides tolérées). Le script reconnaît les catégories SONARR/RADARR (maj ou via chemins) pour décider si la ligne est éligible au purge.
+  - SYNO_ENV            : fichier .env chargé pour définir MAP_FILE, ALLOW, etc.
+  - MAP_FILE            : mapping d’origine (CLI > ENV > défaut script).
+  - ALLOW               : catégories qBittorrent à considérer (ex. sonarr/radarr).
+
+- Structure du mapping d’entrée :
+  ORIG|SRC|DST
+  Les lignes vides, espaces superflus ou commentaires (#) sont tolérés.
+
+- Critères d’éligibilité au pruning :
+  - Catégorie SONARR / RADARR (via colonne ORIG ou via heuristique chemin).
+  - SRC et DST situés sur le même device (stat -c %d identique).
+  - Même inode (stat -c %i identique) → hardlink validé.
 
 [OUTPUTS]
-- Toujours : affichage d’un résumé PREVIEW (target_output, purge/keep/skip/total).
-- Sans --write : supprime simplement le fichier temporaire et quitte (aucune sortie sur disque).
-- Avec --write --yes et sans --in-place : écrit OUT_FILE (mkdir -p du parent) à partir du TMP.
-- Avec --write --yes et --in-place : crée backup/mapping_entries/<nom>.bak_<timestamp>, puis remplace MAP_FILE_INPUT.
-- Pas de log dédié ; sortie sur stdout.
+- Mode PREVIEW (sans --write) :
+  - affiche le plan de pruning (keep/purge/skip/total),
+  - crée un fichier temporaire mais le supprime avant sortie,
+  - aucune écriture persistante.
+
+- Mode WRITE :
+  • --write + --yes sans --in-place :
+      - crée OUT_FILE (mkdir -p du parent),
+      - sauvegarde le TMP → OUT_FILE,
+      - affiche un récapitulatif succinct.
+
+  • --write + --yes + --in-place :
+      - crée backup/mapping_entries/<nom>.bak_<timestamp>,
+      - remplace le MAP_FILE d’origine via mv (SAFE-CREATE minimal),
+      - assure chmod/chown si requis.
+
+- Aucune génération de .state, aucun log fichier : stdout uniquement.
 
 [FAILURE_MODES]
-- MAP_FILE_INPUT introuvable → [NOK] mapping file not found et exit 2.
-- Absence de --yes lorsque --write est fourni → [NOK] et exit 3.
-- Permissions insuffisantes sur MAP_FILE ou OUT_FILE → mv/cp échouent, exit ≠ 0.
-- Si aucun des chemins passés n’est sur le même device que /syno, la vérification stat échoue (pas de purge) mais le script continue en mode best effort (ligne conservée).
-- Les tests stat peuvent échouer (fichier absent) : la ligne est conservée (keep++), pas d’arrêt.
+- MAP_FILE_INPUT absent → [NOK] mapping file not found → exit 2.
+- Absence de --yes lorsque --write est fourni → [NOK] → exit 3.
+- Permissions insuffisantes (cp/mv) → arrêt immédiat (exit ≠ 0).
+- SRC ou DST manquant / illisible → ligne conservée (keep++).
+- stat échoue (device différent, fichier absent) → ligne conservée (keep++).
+- Device SRC ≠ device DST → hardlink impossible → ligne conservée.
+- Erreur mkdir pour dossiers parents → exit ≠ 0.
+- En cas de purge massive, le script ne fournit pas encore de seuil de sécurité
+  (TODO potentiel pour une future version).
+
+[OBSERVATIONS & LIMITES]
+- Le pruning dépend fortement de l’exactitude du mapping existant : une ligne
+  mal formée ou un chemin obsolète génère un keep (jamais une purge).
+- Aucun contrôle sur le contexte qBittorrent : une entrée peut être purgée
+  même si le torrent existe encore, tant que hardlink SRC/DST est validé.
+- La gestion des backups repose sur mv/cp classiques, non encore intégrée dans
+  la logique SAFE-WRITE/SAFE-CREATE du projet (amélioration possible en v1.2).
+- Les catégories ALLOW ne contrôlent pas strictement la purge ; leur rôle peut
+  être clarifié et homogénéisé avec daily/apply.
 
 [HISTORIQUE]
-- Version 1.1 introduit une arborescence de backups dédiée (backup/mapping_entries) et la création automatique des dossiers parents (commentaire dans le header).
-- Succède à v1.0 (non fournie ici) qui effectuait déjà le pruning sans gestion avancée des backups.
-- À COMPLÉTER via Git pour dater la sortie exacte et identifier les prochaines évolutions (support d’autres catégories, etc.).
+- v1.1 :
+    • introduction du répertoire backup/mapping_entries,
+    • création automatique des répertoires parents,
+    • durcissement des vérifications stat,
+    • meilleure séparation preview/write/in-place.
+- v1.0 :
+    • prune basique sans gestion avancée des backups ni confirmation --yes.
+- Dates exactes à confirmer via Git : le script semble antérieur aux versions
+  sequential du pipeline synomap (2024-2025).
