@@ -236,28 +236,51 @@ infer_hash() {
   base=$(basename -- "$dst")
   base_noext=$(printf '%s' "$base" | sed 's/\.[^.]*$//')
   folder=$(basename -- "$dir")
-  if all=$(qb_info_all || true); then
-    H2=$(printf '%s' "$all" | jq -r --arg d "$dir" '
-      .[] | select(.content_path != null and ((.content_path|startswith($d+"/")) or .content_path==$d)
-                 or (.save_path|startswith($d+"/")) or .save_path==$d)
-      | .hash
-    ' 2>/dev/null | head -n 1)
-    if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_path"; return 0; fi
-    H2=$(printf '%s' "$all" | jq -r --arg b "$base_noext" --arg f "$folder" '
-      .[] | select(.name != null) | select((.name|test($b;"i")) or (.name|test($f;"i"))) | .hash
-    ' 2>/dev/null | head -n 1)
-    if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_name"; return 0; fi
-  fi
   cat=""
   echo "$dst" | grep -qi "/radarr/" && cat="radarr"
   echo "$dst" | grep -qi "/sonarr/" && cat="sonarr"
   if [ -n "$cat" ]; then
     if ac=$(qb_info_cat "$cat" || true); then
       H2=$(printf '%s' "$ac" | jq -r --arg b "$base_noext" --arg f "$folder" '
-        .[] | select(.name != null) | select((.name|test($b;"i")) or (.name|test($f;"i"))) | .hash
+        .[]
+        | select(.name != null)
+        | select(
+            ((($b|length)>0) and (.name|test($b;"i")))
+            or ((($f|length)>0) and (.name|test($f;"i")))
+          )
+        | .hash
       ' 2>/dev/null | head -n 1)
       if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_category"; return 0; fi
     fi
+  fi
+  all=""
+  if all=$(qb_info_all || true); then
+    H2=$(printf '%s' "$all" | jq -r --arg b "$base_noext" --arg f "$folder" '
+      .[]
+      | select(.name != null)
+      | select(
+          ((($b|length)>0) and (.name|test($b;"i")))
+          or ((($f|length)>0) and (.name|test($f;"i")))
+        )
+      | .hash
+    ' 2>/dev/null | head -n 1)
+    if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_name"; return 0; fi
+    H2=$(printf '%s' "$all" | jq -r --arg d "$dir" --arg b "$base_noext" --arg f "$folder" '
+      .[]
+      | select(
+          (.content_path != null and ((.content_path|startswith($d+"/")) or .content_path==$d))
+          or (.save_path != null and ((.save_path|startswith($d+"/")) or .save_path==$d))
+        )
+      | select(
+          (.name != null)
+          and (
+            ((($b|length)>0) and (.name|test($b;"i")))
+            or ((($f|length)>0) and (.name|test($f;"i")))
+          )
+        )
+      | .hash
+    ' 2>/dev/null | head -n 1)
+    if [ -n "$H2" ] && [ "$H2" != "null" ]; then echo "$H2|by_path"; return 0; fi
   fi
   echo "|"
   return 1

@@ -70,3 +70,11 @@ But métier (en 2–3 phrases max) :
 - 2025-??-?? : Création/ajustement de la version v1.32c (issue du script historique daily_qbittorrent_update).
 - v1.31 (2025-11-10) → v1.32c : refactor mineur ; détails à compléter via historique Git.
 - À COMPLÉTER : compléter les dates et changements précis lorsque le repo disposera d’un historique Git plus complet.
+
+[RECENT_CHANGES]
+- 2025-??-?? : Priorité d’inférence du hash corrigée dans synomap_apply_from_plan.sh. La déduction repose désormais d’abord sur la
+  catégorie extraite du chemin (/radarr/ ou /sonarr/) couplée à une correspondance stricte sur le nom (base du fichier ou nom du
+  dossier). Si aucune catégorie ne matche, l’algorithme tente une correspondance globale sur les noms de torrents, et ne se replie
+  sur des heuristiques de chemin qu’en tout dernier ressort tout en vérifiant le nom. Cette hiérarchie évite des mauvais
+  rattachements comme le cas réel « Mickey » pris à la place de « Scream » parce que le save_path semblait déjà correct dans
+  /syno/.../radarr. Résultat : beaucoup moins de risques de déplacer/rechecker le mauvais torrent lors d’un setLocation.
