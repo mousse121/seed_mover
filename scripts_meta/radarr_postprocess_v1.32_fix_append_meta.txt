@@ -3,43 +3,60 @@ SCRIPT_NAME: radarr_postprocess_v1.32_fix_append.sh
 PROJECT: SEED_MOVER
 
 [ROLE]
-- Hook post-traitement Radarr chargé de consigner pour chaque film importé le lien entre le fichier original du client BitTorrent et la destination finale gérée par seed_mover.
-- Alimente le pipeline synomap en ajoutant une entrée RADARR|SRC|DST au mapping partagé et en déposant un fichier .state pour que les étapes ultérieures sachent quoi relier ou nettoyer.
+- Hook post-traitement Radarr déclenché après l’import ou l’upgrade d’un film.
+- Enregistre, pour chaque fichier importé, la correspondance entre le fichier original récupéré via le client BitTorrent et le fichier final placé par Radarr dans son arborescence.
+- Prépare les données pour seed_mover : ajoute une entrée RADARR|SRC|DST dans le mapping partagé et écrit un fichier .state pour que les étapes synomap sachent quel fichier relier ou nettoyer.
 
 [CONTEXT]
-- Exécuté côté Radarr (hook "On Import" ou "On Upgrade") dans un conteneur ou VM où /scripts pointe vers /srv/.../data/scripts.
-- Nécessite seulement /bin/sh et les utilitaires POSIX de base (mkdir, chmod, chown, date, basename).
-- Dossiers créés automatiquement : dossier du mapping (par défaut /scripts/synomap/mapping_entries.txt), /scripts/state pour les fichiers .state et /scripts/synomap/log pour le log.
-- Lit les variables d’environnement fournies par Radarr (RADARR_* ou en minuscules) : chemin destination (RADARR_MOVIEFILE_PATH), chemin source (RADARR_MOVIEFILE_SOURCEPATH), catégorie download client, type d’évènement.
-- Peut aussi lire un fichier d’environnement externe si LOG, MAP, STATE_DIR ou MAP_OWNER/MAP_GROUP sont surchargés par le wrapper systemd/crontab.
-- N’écrit que localement : append dans mapping_entries.txt via lockdir, création d’un .state sous STATE_DIR et log texte sous LOG.
-- Aucun appel réseau : le script se contente de préparer les données que d’autres scripts utiliseront.
+- Exécuté dans le conteneur Radarr, via les hooks On Import / On Upgrade.
+- Environnement attendu : /bin/sh + utilitaires POSIX (mkdir, chmod, date, basename). Aucun appel réseau.
+- Accès aux chemins via les montages Radarr : le script suppose que Radarr voit /scripts et /data (conformément au docker-compose habituel).
+- Lecture automatique des variables d’environnement Radarr :
+  - RADARR_MOVIEFILE_PATH (chemin final du fichier),
+  - RADARR_MOVIEFILE_SOURCEPATH (chemin source, parfois absent selon le download client),
+  - RADARR_DOWNLOAD_CLIENT_CATEGORY,
+  - RADARR_EVENTTYPE.
+- Reconstruction du SRC si Radarr ne fournit pas RADARR_MOVIEFILE_SOURCEPATH : /data/torrents/completed/<cat>/<basename>. Cette règle fait partie de la convention seed_mover (non optionnelle).
+- Filesystem utilisé :
+  - MAP (mapping_entries.txt) sous /scripts/synomap/,
+  - STATE_DIR sous /scripts/state/,
+  - LOG sous /scripts/synomap/log/.
+- Mécanisme de lock : MAP.lockdir est utilisé pour sérialiser l’accès en écriture au mapping et éviter les corruptions.
+- Aucune interaction avec qBittorrent ou Radarr API : ce script prépare uniquement les données pour les étapes ultérieures.
 
 [INPUTS]
-- Pas d’arguments CLI : tout provient de l’environnement.
-- Variables critiques (avec priorité env > valeur interne) :
-  - LOG : fichier de log (défaut /scripts/synomap/log/radarr_postprocess.log).
+- Aucun argument CLI : le fonctionnement repose entièrement sur l’environnement du conteneur.
+- Variables d’environnement :
+  - LOG : fichier log (défaut /scripts/synomap/log/radarr_postprocess.log).
   - MAP : fichier de mapping partagé (défaut /scripts/synomap/mapping_entries.txt).
-  - STATE_DIR : répertoire des .state (défaut /scripts/state).
-  - LOCKDIR : répertoire de lock (défaut MAP.lockdir).
+  - STATE_DIR : répertoire des fichiers .state (défaut /scripts/state).
+  - LOCKDIR : répertoire du lock (défaut MAP.lockdir).
   - MAP_OWNER / MAP_GROUP : propriétaire/groupe à appliquer sur MAP (optionnel).
-  - radarr_eventtype / RADARR_EVENTTYPE, radarr_moviefile_path / RADARR_MOVIEFILE_PATH, radarr_moviefile_sourcepath / RADARR_MOVIEFILE_SOURCEPATH, radarr_download_client_category / RADARR_DOWNLOAD_CLIENT_CATEGORY.
-- Si Radarr ne fournit pas le chemin source, le script reconstruit SRC sous /data/torrents/completed/<cat>/<basename> (hypothèse de convention seed_mover).
-- Les chemins doivent être valides dans l’espace de noms du conteneur (ceux montés par Radarr dans /data et /scripts).
+  - Variables Radarr : RADARR_EVENTTYPE, RADARR_MOVIEFILE_PATH, RADARR_MOVIEFILE_SOURCEPATH, RADARR_DOWNLOAD_CLIENT_CATEGORY.
+- Priorité :
+  1. Variables d’environnement (si définies par wrapper ou compose),
+  2. Valeurs défaut internes.
+- Contraintes :
+  - Les chemins fournis par Radarr doivent correspondre aux volumes montés (attention : selon la configuration Docker, certains chemins peuvent être relatifs ou remappés).
+  - Mapping_entries.txt est append-only : aucune vérification de doublon.
 
 [OUTPUTS]
-- Ajoute une ligne "RADARR|<SRC>|<DST>" au fichier MAP ; chmod 664 et chown optionnel.
-- Crée un fichier .state nommé d’après le basename du DST (caractères / et \ remplacés par _) contenant les paires SRC/DST/CAT/WHEN.
-- Journalise sur LOG (append) et ne crée pas d’autres fichiers de trace.
-- Aucun effet direct sur Radarr ou qBittorrent : cette étape ne fait que préparer les données pour synomap.
+- Ajout d’une ligne RADARR|<SRC>|<DST> au MAP, sous lockdir.
+- Création d’un fichier .state dans STATE_DIR contenant SRC, DST, CAT, WHEN (timestamp).
+- Journalisation append dans LOG (stdout n’est pas utilisé).
+- Pas d’effet direct sur Radarr ou qBittorrent ; aucun appel API.
 
 [FAILURE_MODES]
-- Environnement critique manquant (ex. DST vide) → set -eu provoque un exit ≠ 0 et rien n’est écrit.
-- Lockdir indisponible pendant >25 tentatives (5 secondes) → écrit un WARN dans le log puis exit 0 sans modifier le mapping (skip volontaire pour éviter la corruption).
-- Accès filesystem refusé (chmod/chown) → ignoré via || true, donc best effort sans bloquer.
-- L’absence de LOG ou de STATE_DIR déclenche la création automatique via mkdir -p ; si cela échoue, l’exit code est ≠0.
+- Variables essentielles manquantes (ex : DST vide) → set -eu → exit ≠ 0, aucune écriture.
+- Lockdir indisponible après 25 tentatives → écrit WARN dans LOG, exit 0 (skip sécurisé).
+- Échecs chmod/chown → ignorés via “|| true”, comportement best effort.
+- Échec mkdir -p (LOG / STATE_DIR / MAP) → exit ≠ 0.
+- Absence de SRC (Radarr ne fournit rien et reconstruction impossible) → skip silencieux avec trace dans LOG.
+- Exit codes :
+  - ≠ 0 : erreurs structurelles (env critique manquante, impossible de créer répertoires).
+  - = 0 : skips contrôlés (lockdir indisponible, état incomplet).
 
 [HISTORIQUE]
-- Version v1.32 fix append mentionnée dans l’en-tête mais sans date explicite (probablement fin 2024 / début 2025).
-- Successeur d’un hook Radarr antérieur (versions <=1.31) destiné à gérer les locks sur mapping_entries.
-- À COMPLÉTER via historique Git pour dater précisément l’ajout du mécanisme LOCKDIR et des .state.
+- v1.32 - “fix append” : ajout du mécanisme LOCKDIR, durcissement des rules append sur le mapping, introduction généralisée des fichiers .state.
+- Héritier des hooks Radarr 1.31 utilisés sans synchronisation.
+- À COMPLÉTER via historique Git pour préciser la date exacte des premières versions.
