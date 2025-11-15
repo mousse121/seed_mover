@@ -1,0 +1,61 @@
+[ID]
+SCRIPT_NAME: synomap_apply_from_plan.sh
+PROJECT: SEED_MOVER
+
+[ROLE]
+- Moteur unifié d'application des plans synomap : traite chaque torrent de façon séquentielle, depuis la pause qBittorrent jusqu'à la reprise avec tag SYNO.
+- Normalise les entrées du plan, crée les hardlinks manquants, gère les sidecars (copy/ignore/redownload) et pilote qBittorrent pour setLocation, recheck contrôlé et resume.
+- Conçu pour regrouper les logiques "classique" et "sequential" en un seul script, avec mode PREVIEW par défaut et mode WRITE explicite.
+
+[CONTEXT]
+- À lancer sur l'hôte OMV ayant accès en lecture/écriture aux chemins /data/... (source) et /syno/... (destination), et pouvant atteindre l'API qBittorrent locale.
+- Nécessite les binaires POSIX suivants : /bin/sh, curl, jq, sed, awk, tr, nl, ln, mkdir, stat, cp, mount, umount, mountpoint.
+- Charge un fichier d'environnement (SYNO_ENV) si présent, sinon synomap.env placé à côté du script pour définir QB_URL/QB_USER/QB_PASS et paramètres optionnels (UMASK, etc.).
+- Exécute toutes les opérations en root ou équivalent lorsque mount --bind est requis ; aucune écriture dans le plan d'entrée.
+
+[INPUTS]
+- Paramètres CLI obligatoires et options :
+  PLANFILE                : fichier de plan à consommer (texte, format daily_qbittorrent_update).
+  --write                 : active les opérations réelles (sinon PREVIEW).
+  --sleep-seconds N       : pause entre deux torrents (défaut 2s).
+  --move-timeout-sec N    : délai maximal pour enter_checking après setLocation/bind (défaut 900s).
+  --recheck-timeout-sec N : délai maximal pour wait_check_done (défaut 900s).
+  --sidecars MODE         : copy|ignore|redownload (défaut copy).
+  --no-bind               : désactive les mount --bind temporaires.
+  --debug                 : journalisation détaillée + dumps API.
+- Variables d'environnement nécessaires : QB_URL, QB_USER, QB_PASS (levées via ${...:?}). UMASK, SYNO_ENV, TMPDIR, WRITE, SLEEP_SECS, MOVE_TIMEOUT, RECHECK_TIMEOUT, SIDECARS_MODE, USE_BIND et DEBUG peuvent être pré-configurées mais restent surchargées par les options CLI.
+- Format du plan :
+  - blocs identifiés par un hash SHA1 (40 hex), suivis de lignes "plan: ln 'SRC' -> 'DST'".
+  - le script nettoie les CR, numérote les lignes, extrait HASH/SRC/DST et reconstitue ITEMS sous forme hash|src|dst.
+  - si le plan est dépourvu de hash, infer_hash tente une résolution via les métadonnées qBittorrent (catégorie, nom, chemin).
+
+[OUTPUTS]
+- Mode PREVIEW (par défaut) :
+  - journalise les actions qui seraient menées (pause, ln, sidecars, bind, setLocation, recheck, resume/tag) sans toucher aux fichiers ni à qBittorrent.
+  - rappelle la stratégie sidecars et l'état des liens existants.
+- Mode WRITE (--write) :
+  - crée DEST_DIR (mkdir -p), pose les hardlinks (ln) et applique la stratégie sidecars (copie simple + filePrio ou priorité à zéro).
+  - pilote qBittorrent pour pause, désactivation AutoTMM, setLocation vers DEST_DIR, recheck (enter_checking_or_timeout + wait_check_done), resume et ajout du tag SYNO.
+  - peut monter temporairement le save_path d'origine sur DEST_DIR via mount --bind lorsque la source est sous /data/ ; nettoie ACTIVE_BIND en sortie.
+  - supprime les fichiers temporaires RAW/HASHES/PAIRS/ITEMS/COOKIE au fur et à mesure du trap cleanup.
+- Les traces sont envoyées sur stdout/stderr ; pas de log dédié ni d'artefact persistant.
+
+[FAILURE_MODES]
+- Entrées invalides : plan absent/inaccessible → die "plan file required / plan not found" (exit ≠ 0).
+- Environnement : variables QB_URL/QB_USER/QB_PASS manquantes ou dépendance système absente → die immédiat via need/parameter expansion.
+- API qBittorrent : login échoué → die "qB login failed" ; appels form/json journalisés en WARN si HTTP≠200 ou réponse non JSON, sans arrêt forcé (best effort après authentification).
+- Parsing plan : SRC/DST manquants → ligne ignorée ; hash introuvable et infer_hash échoue → WARN + skip de l'entrée.
+- Opérations WRITE : erreurs ln/mkdir/bind/stat → WARN mais poursuite du plan ; mount --bind défaillant laisse potentiellement le save_path non remappé (ACTIVE_BIND géré pour éviter les fuites si le script se termine proprement).
+- Recheck : enter_checking_or_timeout et wait_check_done génèrent des WARN sur dépassement ; la suite continue mais l'intégrité du torrent reste incertaine.
+- Codes de sortie : 0 si l'initialisation (plan, env, deps, login) réussit malgré des WARN ; non-zero en cas d'échec critique.
+
+[OBSERVATIONS & LIMITES]
+- Forte dépendance à jq/curl et aux droits root pour mount --bind ; en environnement restreint, --no-bind est obligatoire.
+- Les timeouts MOVE/RECHECK sont fixes et appliqués en boucle, ce qui peut rallonger les traitements sur des torrents bloqués.
+- En cas de crash entre mount --bind et umount, le bind peut rester en place malgré le trap (risque à surveiller manuellement).
+- Aucune journalisation vers fichier ni métrique : les analyses post-run reposent uniquement sur stdout/stderr.
+
+[HISTORIQUE]
+- Script introduit pour remplacer à la fois synomap_apply_from_plan_v1.2.6 (classique) et synomap_apply_from_plan_v1.6.9_sequential, avec l'objectif d'unifier les workflows.
+- Hérite du séquencement strict, des protections JSON et de la gestion sidecars de la branche sequential, tout en simplifiant le déploiement (un seul script à maintenir).
+- Les anciennes versions restent conservées dans scripts_meta pour archivage et référence.
