@@ -3,45 +3,94 @@ SCRIPT_NAME: synomap_apply_from_plan_v1.2.6.sh
 PROJECT: SEED_MOVER
 
 [ROLE]
-- Interpréteur de plan synomap "classique" : lit un fichier plan généré par daily_qbittorrent_update et applique (ou prévisualise) les actions nécessaires pour synchroniser les torrents vers l’arborescence Synology.
-- En mode WRITE, crée les hardlinks, repositionne les torrents via l’API qBittorrent, applique le tag SYNO et relance un recheck uniquement si un nouveau lien vient d’être posé.
+- Interpréteur de plan synomap "classique" : lit un plan généré par daily_qbittorrent_update et applique (ou simule) les opérations nécessaires pour synchroniser les torrents vers l’arborescence Synology.
+- En mode WRITE, crée les hardlinks manquants, ajuste le save_path des torrents via l’API qBittorrent, applique le tag SYNO et déclenche un recheck lorsque de nouveaux liens sont posés.
+- Sert d’étape intermédiaire entre la génération du plan et les phases de cleanup OMV.
 
 [CONTEXT]
-- Pensé pour tourner sur le serveur OMV hébergeant les données (mêmes volumes que qBittorrent) avec accès à /syno/... et /data/....
-- Dépendances système minimales : /bin/sh, ln, mkdir, stat, sed, grep, cut, curl (pour API qBittorrent). Aucun awk utilisé (contrainte POSIX pure mentionnée dans l’en-tête).
-- Charge optionnellement un fichier d’environnement SYNO_ENV (synomap.env) fournissant QB_URL, QB_USER, QB_PASS, DEST_ROOT, UMASK…
-- Consomme un "plan" texte composé d’un entête SHA1 + métadonnées puis de lignes « plan: ln 'SRC' -> 'DST' ».
-- En mode WRITE, crée les répertoires cibles (DEST_DIR), pose les hardlinks, puis pilote qBittorrent via les endpoints /torrents/setLocation, /addTags (SYNO) et /recheck.
-- En mode preview (défaut), décrit simplement les actions (mkdir, ln, qB:*) sans modifier le système.
+- Conçu pour tourner sur le serveur OMV hébergeant à la fois :
+  - les volumes de données /data/...,
+  - les points de montage Synology /syno/...,
+  - et le conteneur qBittorrent.
+- Dépendances système : /bin/sh, ln, mkdir, stat, sed, grep, cut, curl (API qBittorrent). Aucun awk n’est requis (contrainte POSIX stricte).
+- Peut charger un fichier d’environnement SYNO_ENV (synomap.env) pour initialiser QB_URL, QB_USER, QB_PASS, DEST_ROOT, UMASK et autres paramètres globaux.
+- Structure du plan consommé :
+  - entête contenant un hash (40 hex) et des métadonnées (dest_dir=..., flags, etc.),
+  - lignes d’action du type :
+      plan: ln 'SRC' -> 'DST'
+  - les blocs marqués SKIP ou [NOSTAT] sont ignorés.
+- Toutes les interactions réseau sont limitées à l’API HTTP de qBittorrent (setLocation, addTags, recheck).
 
 [INPUTS]
 - Paramètres CLI :
-  - --write : active le mode effectif ; sinon tout est PREVIEW.
-  - PLAN : chemin obligatoire vers le fichier plan.
-- Variables d’environnement importantes :
-  - SYNO_ENV : chemin d’un .env chargé deux fois (avant/après parsing) pour récupérer QB_URL/QB_USER/QB_PASS et éventuellement DEST_ROOT ou UMASK.
-  - QB_URL, QB_USER, QB_PASS : nécessaires pour authentifier qBittorrent ; sans eux, COOKIE reste vide et les appels API sont ignorés.
-  - DEST_ROOT (optionnel) : fallback si le header de plan ne contient pas dest_dir.
-  - UMASK : utilisé lors des mkdir/ln en mode write.
+  - PLAN       : chemin du fichier plan (obligatoire).
+  - --write    : active les modifications réelles (sinon, PREVIEW pur).
+- Variables d’environnement :
+  - SYNO_ENV   : chemin d’un .env chargé pour initialiser QB_URL, QB_USER, QB_PASS, DEST_ROOT, UMASK.
+  - QB_URL     : URL de l’API qBittorrent.
+  - QB_USER    : utilisateur API.
+  - QB_PASS    : mot de passe API.
+  - DEST_ROOT  : fallback si le plan ne fournit pas dest_dir.
+  - UMASK      : umask utilisée lors des mkdir/ln en mode WRITE.
+- Priorité :
+  1. Valeurs issues du plan (dest_dir, etc.),
+  2. Variables d’environnement (via SYNO_ENV ou export),
+  3. Valeurs par défaut internes au script.
 - Format du plan :
-  - Chaque bloc commence par une ligne de 40 hex décrivant le hash (et possiblement dest_dir=...).
-  - Les actions sont sur des lignes "plan: ln 'SRC' -> 'DST'". Les entêtes contenant SKIP: ou [NOSTAT] sont ignorés.
+  - chaque bloc hash regroupe un torrent,
+  - chaque ligne plan: ln 'SRC' -> 'DST' décrit un lien à créer,
+  - les lignes non conformes ou commentées sont ignorées.
 
 [OUTPUTS]
-- PREVIEW : écrit sur stdout les actions simulées (mkdir, ln, qB:setLocation, qB:addTags, qB:recheck) et le nombre d’items traités.
-- WRITE : effectue réellement les mkdir -p, hardlinks et appels qBittorrent (setLocation, addTags SYNO, recheck selon recheck flag) ; affiche également les opérations réalisées.
-- Ne modifie pas le fichier de mapping : il travaille uniquement à partir du plan fourni.
-- Ne crée pas de fichiers log persistants ; toute la trace est sur stdout.
+- Mode PREVIEW (par défaut) :
+  - affiche les actions simulées :
+      mkdir -p DEST_DIR
+      ln 'SRC' 'DST'
+      qB:setLocation HASH DEST_DIR
+      qB:addTags HASH SYNO
+      qB:recheck HASH
+  - un récapitulatif du nombre d’items traités est présenté à la fin.
+- Mode WRITE (--write) :
+  - crée réellement les répertoires DEST_DIR (mkdir -p),
+  - crée les hardlinks (ln SRC DST),
+  - appelle l’API qBittorrent :
+      /torrents/setLocation (vers DEST_DIR),
+      /torrents/addTags (tag SYNO),
+      /torrents/recheck (uniquement si un nouveau lien a été posé),
+  - la trace d’exécution reste sur stdout ; aucun log dédié n’est créé.
+- Le script ne modifie pas le fichier mapping_entries.txt : il travaille uniquement à partir du plan fourni.
 
 [FAILURE_MODES]
-- PLAN absent ou illisible → message "ERR: plan not found" et exit ≠ 0.
-- Impossible de parser SRC/DST d’une ligne → ligne ignorée (continue) sans stop global.
-- mkdir/ln échoue (permissions, cross-dev) → message "ERR ln" ou "SKIP link" mais le script continue (best effort) ; recheck est alors omis.
-- Authentification qBittorrent : si login échoue, COOKIE reste vide et toutes les actions API sont simplement ignorées (pas d’arrêt).
-- curl vers setLocation/addTags/recheck est best effort (|| true) : les erreurs réseau n’arrêtent pas le traitement.
-- Exit code = 0 même si certaines actions échouent ; seul un argument invalide ou un plan manquant entraîne un échec bloquant.
+- PLAN non fourni ou illisible → message ERR: plan not found et exit ≠ 0.
+- Parsing SRC/DST impossible sur une ligne → ligne ignorée (skip local) sans interrompre le reste du plan.
+- mkdir/ln échouent (droits, cross-device, chemin invalide) :
+  - journalisation “ERR ln” ou “SKIP link”,
+  - recheck qB n’est pas déclenché pour ces entrées,
+  - le traitement continue sur les lignes suivantes (best effort).
+- Authentification qBittorrent :
+  - si login échoue, COOKIE reste vide,
+  - les appels API sont alors no-op (ou simplement skip) sans arrêter le script.
+- curl vers setLocation/addTags/recheck :
+  - exécutés en best effort (souvent protégés par “|| true”),
+  - les erreurs réseau n’arrêtent pas l’exécution globale.
+- Exit code global :
+  - ≠ 0 uniquement en cas d’erreur d’entrée (plan manquant/illisible ou usage incorrect),
+  - 0 même si certaines opérations individuelles échouent (modèle best effort).
+
+[OBSERVATIONS & LIMITES]
+- L’exécution se fait en boucle simple sur les lignes du plan, sans mécanisme de séquencement strict entre les appels qBittorrent :
+  - pas de pause forcée,
+  - pas de contrôle explicite des états intermédiaires (checking, moved, etc.),
+  - ce qui peut exposer le pipeline à des conditions de course sur certains environnements chargés.
+- Pas de gestion avancée des "sidecars" (.nfo, .srt, etc.) : seule la logique SRC→DST basique est appliquée.
+- Aucune limitation de débit ni de parallelisme côté qBittorrent (tout passe en séquence, mais sans attente fine des transitions internes).
+- L’absence de log fichier rend l’analyse post-mortem plus délicate en cas d’incident.
 
 [HISTORIQUE]
-- Version 1.2.6 décrite comme "POSIX sh only, no awk" ; probablement héritée du pipeline synomap 2024.
-- Reprend le comportement d’un apply_from_plan plus ancien (<=1.2.5) en y ajoutant un parseur sans awk et la gestion fine du recheck.
-- À COMPLÉTER via historique Git pour dater l’introduction de SYNO_ENV et du mode preview/WRITE.
+- v1.2.6 :
+  - version POSIX sh only, explicitement documentée comme sans awk,
+  - restructuration du parsing du plan par rapport aux versions ≤1.2.5,
+  - affinage de la logique de recheck (uniquement si un nouveau lien a été créé).
+- Utilisée comme moteur d’application principal dans le pipeline synomap 2024–2025 avant l’introduction de la version “sequential”.
+- Des comportements de type "race" entre commandes qBittorrent ont été observés en production, ce qui a motivé la conception de la lignée 1.6.x_sequential.
+- Dates et commits précis à confirmer via l’historique Git.
