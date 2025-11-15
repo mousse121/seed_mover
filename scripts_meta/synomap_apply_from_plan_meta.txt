@@ -59,3 +59,11 @@ PROJECT: SEED_MOVER
 - Script introduit pour remplacer à la fois synomap_apply_from_plan_v1.2.6 (classique) et synomap_apply_from_plan_v1.6.9_sequential, avec l'objectif d'unifier les workflows.
 - Hérite du séquencement strict, des protections JSON et de la gestion sidecars de la branche sequential, tout en simplifiant le déploiement (un seul script à maintenir).
 - Les anciennes versions restent conservées dans scripts_meta pour archivage et référence.
+
+[RECENT_CHANGES]
+- 2025-11-15 : Priorité d’inférence du hash corrigée dans synomap_apply_from_plan.sh. La déduction repose désormais d’abord sur la
+  catégorie extraite du chemin (/radarr/ ou /sonarr/) couplée à une correspondance stricte sur le nom (base du fichier ou nom du
+  dossier). Si aucune catégorie ne matche, l’algorithme tente une correspondance globale sur les noms de torrents, et ne se replie
+  sur des heuristiques de chemin qu’en tout dernier ressort tout en vérifiant le nom. Cette hiérarchie évite des mauvais
+  rattachements comme le cas réel « Mickey » pris à la place de « Scream » parce que le save_path semblait déjà correct dans
+  /syno/.../radarr. Résultat : beaucoup moins de risques de déplacer/rechecker le mauvais torrent lors d’un setLocation.
