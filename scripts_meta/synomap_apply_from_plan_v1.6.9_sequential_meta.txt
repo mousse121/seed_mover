@@ -1,0 +1,55 @@
+[ID]
+SCRIPT_NAME: synomap_apply_from_plan_v1.6.9_sequential.sh
+PROJECT: SEED_MOVER
+
+[ROLE]
+- Version "sequential strict" du moteur d’application synomap : traite chaque entrée d’un plan en séquence avec pauses forcées, recheck bloquant et gestion des sidecars pour garantir l’intégrité lors des migrations sensibles.
+- Automatise l’intégralité du workflow pour un torrent donné : hardlink (si absent), ajustement du save_path qBittorrent, désactivation d’AutoTMM, bind-mount temporaire éventuel, copie ou re-priorisation des fichiers sidecars et recheck contrôlé.
+
+[CONTEXT]
+- À exécuter sur l’hôte OMV disposant d’accès root aux volumes /data et /syno, car le script manipule mount --bind et umount.
+- Dépendances : /bin/sh, curl, jq, sed, awk, ln, mount, umount, cp, tr, nl, stat, mkdir, sleep.
+- Nécessite un fichier synomap.env à côté du script (chargé si QB_URL n’est pas déjà exportée) contenant QB_URL, QB_USER, QB_PASS.
+- Consomme un plan texte identique à celui de v1.2.6 (lignes SHA1 + "plan: ln ..."), mais construit un fichier temporaire normalisé (ITEMS) avec hash|src|dst.
+- Se connecte à qBittorrent via son API HTTP (auth obligatoire) pour toutes les opérations (pause, setLocation, recheck, tags, file priorities, file list) ; arrête l’exécution si l’auth échoue.
+- Le mode WRITE est désactivé par défaut : en preview, il se contente d’annoncer les actions (setLocation, bind) sans les exécuter.
+
+[INPUTS]
+- Paramètres CLI :
+  - --write : active les modifications réelles (sinon preview).
+  - --sleep-seconds N : délai entre chaque torrent (défaut 2s).
+  - --move-timeout-sec / --recheck-timeout-sec : temps max pour les phases critiques.
+  - --sidecars copy|ignore|redownload : stratégie pour les fichiers .nfo/.srt/etc (copy = copie locale + priorité, ignore = priorité 0, redownload = priorité 1 seulement).
+  - --no-bind : désactive l’usage de mount --bind si save_path sous /data.
+  - --debug : imprime des extraits du parsing.
+  - PLANFILE : chemin obligatoire du plan.
+- Variables d’environnement :
+  - QB_URL/QB_USER/QB_PASS (obligatoires, sinon erreur via : ${QB_URL:?}).
+  - SYNO_ENV implicite via script_dir/synomap.env.
+  - WRITE, SLEEP_SECS, MOVE_TIMEOUT, etc. peuvent aussi être définies avant exécution, mais les options CLI priment.
+- Le plan doit être en UTF-8 ASCII ; le script supprime les CR et numérote les lignes pour corréler hash/SRC/DST.
+
+[OUTPUTS]
+- PREVIEW : affiche pour chaque torrent la source/destination, l’état du lien (existe / créé), la stratégie sidecars, et indique les commandes qBittorrent qui seraient lancées.
+- WRITE :
+  - Crée les hardlinks manquants.
+  - Copie/ajuste les sidecars selon la stratégie.
+  - Monte temporairement DEST_DIR sur le save_path d’origine (bind) lorsque c’est possible et requis.
+  - Appelle les API qBittorrent suivantes : pause, setAutoTMM (disable), setLocation, recheck, resume, addTags SYNO, filePrio.
+  - Suit l’état du recheck avec enter_checking_or_timeout + wait_check_done et journalise sur stdout.
+- Aucune écriture de log dédiée ; les fichiers temporaires RAW/HASHES/PAIRS/ITEMS sont créés sous /tmp et supprimés à la fin.
+
+[FAILURE_MODES]
+- PLAN manquant → die "plan file required" ou "plan not found" (exit ≠ 0).
+- Absence de QB_URL/QB_USER/QB_PASS → die immédiat (exit ≠ 0).
+- Manque d’une commande système (curl/jq/ln/...) → die "missing dep".
+- Échec login qBittorrent → "qB login failed" et arrêt.
+- ln ou mount échouent → message "link: create failed" ou "[WARN] bind failed" mais la boucle continue (best effort).
+- Si aucun hash n’est fourni dans le plan et qu’infer_hash ne trouve rien → [WARN] no hash found (ligne ignorée).
+- enter_checking_or_timeout/wait_check_done peuvent dépasser les timeouts et afficher [WARN] mais l’exécution continue.
+- exit code = 0 dès lors que l’initialisation est OK, même si des torrents individuels sont skip/warn.
+
+[HISTORIQUE]
+- Daté explicitement du 2025-11-13 dans l’en-tête comme hotfix v1.6.9 (correction d’un "end if" inattendu et robustesse bind).
+- Successeur de la lignée 1.2.x : cette version introduit le parsing avec jq/nl et la gestion avancée des sidecars/bind.
+- À COMPLÉTER via l’historique Git pour détailler les évolutions (v1.6.8 → v1.6.9, etc.).

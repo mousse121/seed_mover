@@ -1,0 +1,45 @@
+[ID]
+SCRIPT_NAME: synomap_prune_mapping_write_v1.1.sh
+PROJECT: SEED_MOVER
+
+[ROLE]
+- Nettoyeur du fichier mapping_entries : filtre les lignes déjà migrées (hardlink validé entre source Synology et destination finale) afin de produire une version allégée du mapping.
+- En mode WRITE/--in-place, remplace le fichier existant après sauvegarde ; sinon génère un fichier cleaned pour inspection ou diffusion.
+
+[CONTEXT]
+- À lancer sur le serveur qui héberge mapping_entries.txt (typiquement OMV) avec accès aux deux arborescences /syno/... et /data/... pour vérifier les inodes.
+- Dépendances : /bin/sh, mkdir, cp, mv, stat, tr, date, sed, awk optionnel (mais le script n’en dépend pas explicitement), et utilitaires POSIX (printf, cut).
+- Charge SYNO_ENV (synomap.env) pour récupérer MAP_FILE, ALLOW (catégories autorisées) ou d’autres paramètres.
+- N’a aucune interaction réseau : il inspecte le filesystem local uniquement.
+
+[INPUTS]
+- Options CLI :
+  - --input PATH : mapping source (défaut MAP_FILE issu du .env).
+  - --output PATH : fichier cleaned à écrire (défaut mapping_entries.cleaned.txt à côté du fichier source).
+  - --in-place : remplace directement le mapping source (impose la création d’un backup sous backup/mapping_entries/).
+  - --write : autorise l’écriture ; sans cette option le script s’arrête après le résumé PREVIEW.
+  - --yes : confirmation obligatoire lorsqu’on combine --write (sécurité).
+  - --help : affiche l’aide.
+- Variables d’environnement :
+  - SYNO_ENV pour charger MAP_FILE, ALLOW, etc.
+  - MAP_FILE, ALLOW peuvent être définis avant l’exécution ; les options CLI priment.
+- Fichier de mapping attendu : lignes au format ORIG|SRC|DST (avec commentaires ou lignes vides tolérées). Le script reconnaît les catégories SONARR/RADARR (maj ou via chemins) pour décider si la ligne est éligible au purge.
+
+[OUTPUTS]
+- Toujours : affichage d’un résumé PREVIEW (target_output, purge/keep/skip/total).
+- Sans --write : supprime simplement le fichier temporaire et quitte (aucune sortie sur disque).
+- Avec --write --yes et sans --in-place : écrit OUT_FILE (mkdir -p du parent) à partir du TMP.
+- Avec --write --yes et --in-place : crée backup/mapping_entries/<nom>.bak_<timestamp>, puis remplace MAP_FILE_INPUT.
+- Pas de log dédié ; sortie sur stdout.
+
+[FAILURE_MODES]
+- MAP_FILE_INPUT introuvable → [NOK] mapping file not found et exit 2.
+- Absence de --yes lorsque --write est fourni → [NOK] et exit 3.
+- Permissions insuffisantes sur MAP_FILE ou OUT_FILE → mv/cp échouent, exit ≠ 0.
+- Si aucun des chemins passés n’est sur le même device que /syno, la vérification stat échoue (pas de purge) mais le script continue en mode best effort (ligne conservée).
+- Les tests stat peuvent échouer (fichier absent) : la ligne est conservée (keep++), pas d’arrêt.
+
+[HISTORIQUE]
+- Version 1.1 introduit une arborescence de backups dédiée (backup/mapping_entries) et la création automatique des dossiers parents (commentaire dans le header).
+- Succède à v1.0 (non fournie ici) qui effectuait déjà le pruning sans gestion avancée des backups.
+- À COMPLÉTER via Git pour dater la sortie exacte et identifier les prochaines évolutions (support d’autres catégories, etc.).

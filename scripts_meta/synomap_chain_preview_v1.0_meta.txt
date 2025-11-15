@@ -1,0 +1,44 @@
+[ID]
+SCRIPT_NAME: synomap_chain_preview_v1.0.sh
+PROJECT: SEED_MOVER
+
+[ROLE]
+- Orchestrateur "tout-en-un" destiné à enchaîner les trois étapes principales du pipeline synomap (génération de plan, application et nettoyage) en mode PREVIEW.
+- Permet de valider rapidement la cohérence des mappings sans toucher aux données, en produisant un plan temporaire, en appelant l’interpréteur de plan et en déclenchant le cleanup OMV.
+
+[CONTEXT]
+- À lancer manuellement ou via cron/systemd sur le serveur OMV où résident les scripts synomap.
+- Dépendances : /bin/sh standard, mkdir, date, grep, rm ; se contente ensuite d’exécuter d’autres scripts (daily_qbittorrent_update_v1.32c_synomap.sh, synomap_apply_from_plan_v1.2.6.sh, synomap_cleanup_omv_only_v1.0.sh).
+- Charge SYNO_ENV au démarrage pour récupérer MAP_FILE ou d’autres réglages globaux.
+- Les chemins sont dérivés du dossier du script : plans/ pour stocker le plan temporaire, log/ pour y laisser les logs des scripts appelés (ce sont les scripts eux-mêmes qui gèrent l’écriture).
+- Le script ne communique pas directement avec qBittorrent ou Synology ; il délègue ces actions aux sous-scripts.
+
+[INPUTS]
+- Arguments CLI :
+  - --limit N : limite les entrées traitées par le daily (défaut 20).
+  - --map-file PATH : remplace le mapping utilisé pour générer le plan.
+  - --plan-out PATH : où écrire le plan intermédiaire (défaut plans/_auto_plan_<timestamp>.txt).
+  - --keep-plan : conserve le plan au lieu de le supprimer.
+  - --no-apply / --no-cleanup : saute respectivement les étapes 2 ou 3.
+  - --help : affiche l’aide.
+- Variables d’environnement :
+  - SYNO_ENV pour charger MAP_FILE, LIMIT, LOG_DIR, etc.
+  - MAP_FILE, LIMIT, LOG_DIR peuvent être préconfigurés avant l’exécution ; les options CLI priment.
+- Fichier d’entrée principal : mapping_entries.txt (ou chemin passé via --map-file) ; l’écriture se fait dans PLANS_DIR.
+
+[OUTPUTS]
+- Génère un plan texte (copie complète de la sortie du daily) dans PLAN_FILE ; compte et affiche le nombre de lignes plan: ln.
+- Appelle l’appliqueur de plan en mode preview (aucun --write n’est propagé) et capture sa sortie sur stdout/stderr.
+- Appelle le cleanup OMV en mode --preview si disponible, sinon en mode défaut (qui reste non destructif tant qu’on n’ajoute pas --write).
+- Supprime le plan généré, sauf si --keep-plan est fourni.
+- Aucune trace persistante hors du plan éventuellement conservé ; pas de log dédié.
+
+[FAILURE_MODES]
+- Scripts requis manquants ou non exécutables → erreur explicite [NOK] et exit 2.
+- MAP_FILE absent → [NOK] mapping file not found → exit 2.
+- Échec d’un sous-script (daily/apply/cleanup) : l’orchestrateur n’interrompt pas toujours le flux (utilise "|| true" pour apply et cleanup), mais le message d’erreur est visible dans la sortie.
+- Les erreurs d’écriture plan (mkdir/plans) sont fatales (set -e) ; toute défaillance de rm/keep plan est signalée mais non bloquante.
+
+[HISTORIQUE]
+- Première version (v1.0) servant de wrapper PREVIEW autour du workflow synomap circa 2024-2025.
+- Aucun changement antérieur documenté ; À COMPLÉTER via historique Git pour voir si un mode WRITE ou d’autres scripts ont été envisagés.

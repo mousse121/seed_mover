@@ -1,0 +1,43 @@
+[ID]
+SCRIPT_NAME: synomap_cleanup_omv_only_v1.0.sh
+PROJECT: SEED_MOVER
+
+[ROLE]
+- Étape de nettoyage ciblée pour l’hôte OMV : supprime localement les fichiers source déjà migrés vers Synology lorsque le plan indique qu’ils sont hardlinkés et validés à 100 % dans qBittorrent.
+- Empêche l’accumulation de doublons sur les volumes locaux en ne conservant que les copies Synology, après vérification croisée du hash et de l’état qBittorrent.
+
+[CONTEXT]
+- Exécution manuelle ou orchestrée depuis la chaîne synomap, sur le serveur OMV où résident les fichiers /srv/dev-disk-by-uuid-... et où qBittorrent tourne.
+- Dépendances : /bin/sh, curl, sed, stat, rm, jq (optionnel mais utilisé pour extraire save_path/progress), mkdir n’est pas requis.
+- Charge SYNO_ENV au lancement afin de récupérer QB_URL/QB_USER/QB_PASS et OMV_DATA (préfixe des chemins locaux autorisés).
+- Consomme un plan identique à celui produit par daily_qbittorrent_update et parcouru par apply_from_plan.
+- Dialogue avec qBittorrent (si credentials disponibles) pour vérifier que le torrent est stocké sur /syno et que progress=100 %.
+
+[INPUTS]
+- Paramètres CLI : [--write] <plan>. Sans --write, le script est en mode preview (echo des rm) ; avec --write il supprime réellement les SRC.
+- Variables d’environnement :
+  - SYNO_ENV : injecte QB_URL/QB_USER/QB_PASS et OMV_DATA.
+  - OMV_DATA : préfixe obligatoire pour considérer un fichier comme local/supprimable (défaut /srv/dev-disk-by-uuid-).
+  - QB_URL/QB_USER/QB_PASS : nécessaires pour interroger qBittorrent ; si absents, aucune suppression n’est validée.
+- Format du plan : parse les blocs hash + plan: ln via sed, ignore ceux marqués SKIP ou [NOSTAT].
+
+[OUTPUTS]
+- PREVIEW : imprime "rm -- 'SRC'" pour chaque fichier admissible.
+- WRITE : exécute rm -f -- SRC et loggue "RM -- SRC" ; en cas d’échec rm, affiche [WARN].
+- Aucun fichier log n’est produit ; sortie uniquement sur stdout.
+
+[FAILURE_MODES]
+- PLAN non fourni → message d’usage et exit 2.
+- PLAN introuvable → set -e arrête immédiatement (exit ≠ 0).
+- Login qBittorrent impossible → le script continue mais ok_qb_100_syno renvoie faux, donc aucune suppression n’est effectuée.
+- Conditions de validation non réunies :
+  - ok_hardlink (stat) échoue → [SKIP] hash.
+  - ok_qb_100_syno (progress <100 ou save_path hors /syno) échoue → [SKIP].
+  - is_omv_local (chemin hors OMV_DATA) échoue → [SKIP].
+- rm -f peut échouer (droits, verrou) → [WARN] mais le script poursuit.
+- Exit code = 0 sauf erreur initiale (argument manquant ou plan absent).
+
+[HISTORIQUE]
+- Version 1.0 conçue pour l’étape OMV seulement, alignée avec la chaîne synomap preview/cleanup (2024-2025).
+- La présence de REGLAGES_CHATGPT dans le header suggère un portage récent vers l’infrastructure seed_mover.
+- À COMPLÉTER via historique Git pour dater l’ajout du mode --write et des vérifications qBittorrent.
