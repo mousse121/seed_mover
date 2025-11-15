@@ -1,0 +1,41 @@
+[ID]
+SCRIPT_NAME: sonarr_postprocess_v1.32_fix_append.sh
+PROJECT: SEED_MOVER
+
+[ROLE]
+- Hook post-traitement Sonarr qui journalise pour chaque épisode importé l’association entre le chemin source du client BitTorrent et la destination finale.
+- Sert à alimenter le fichier de mapping synomap (tag SONARR) et à générer des fichiers .state consommés par les pipelines d’application/cleanup.
+
+[CONTEXT]
+- Exécuté automatiquement par Sonarr v3/v4 via les variables d’environnement SONARR_* (hook Custom Script) dans l’environnement conteneurisé où /scripts est monté depuis l’hôte.
+- Dépendances minimales : /bin/sh, mkdir, chmod, chown, date, basename, tr.
+- Crée si besoin les dossiers : $(dirname MAP), STATE_DIR et $(dirname LOG), typiquement /scripts/synomap et /scripts/state.
+- Lit exclusivement les variables Sonarr (SONARR_EPISODEFILE_PATH, SONARR_EPISODEFILE_SOURCEPATH, SONARR_DOWNLOAD_CLIENT_CATEGORY, SONARR_EVENTTYPE) et les surcharges de LOG/MAP/STATE_DIR/LOCKDIR.
+- Construit SRC en priorité via SONARR_EPISODEFILE_SOURCEPATH sinon via /data/torrents/completed/<cat>/<basename>.
+- N’interagit avec aucun service externe : la communication avec qBittorrent ou Synology est gérée plus tard par d’autres scripts.
+
+[INPUTS]
+- Aucun argument CLI.
+- Variables critiques :
+  - LOG (défaut /scripts/synomap/log/sonarr_postprocess.log).
+  - MAP (défaut /scripts/synomap/mapping_entries.txt) avec lockdir ${MAP}.lockdir.
+  - STATE_DIR (défaut /scripts/state).
+  - MAP_OWNER / MAP_GROUP pour ajuster les permissions.
+  - SONARR_* (ou minuscules) : EVENTTYPE, EPISODEFILE_PATH (DST), EPISODEFILE_SOURCEPATH (SRC), DOWNLOAD_CLIENT_CATEGORY.
+- Les valeurs CLI inexistantes impliquent la priorité suivante : variables Sonarr > variables génériques exportées par systemd > valeurs par défaut du script.
+
+[OUTPUTS]
+- Append "SONARR|SRC|DST" dans MAP sous verrou mkdir.
+- Crée un fichier STATE_DIR/<basename>.state avec les champs CAT=SONARR, SRC, DST, WHEN ISO8601.
+- Journalisation append dans LOG ; pas de log stdout dédié (Sonarr peut capturer la sortie standard si nécessaire).
+
+[FAILURE_MODES]
+- Absence d’une variable obligatoire (ex. SONARR_EPISODEFILE_PATH vide) → set -eu provoque un arrêt immédiat (exit ≠ 0).
+- Si le lock sur MAP ne peut être obtenu après 25 essais (5 s), la ligne est ignorée (exit 0) et un avertissement est loggé.
+- chmod/chown ou écriture log peuvent échouer silencieusement (|| true) sans bloquer l’exécution.
+- Si STATE_DIR n’est pas accessible, l’écriture .state échoue et provoque un exit ≠ 0 à cause de set -e.
+
+[HISTORIQUE]
+- Variante v1.32 "fix append" héritée de précédentes versions Sonarr (<=1.31) visant à sécuriser l’accès concurrent au mapping.
+- Intégration du support Sonarr v4 (variables minuscules) mentionnée dans le header ; date estimée 2024-2025.
+- À COMPLÉTER via historique Git pour confirmer les dates de sortie et les correctifs précis.
