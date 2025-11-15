@@ -3,41 +3,76 @@ SCRIPT_NAME: synomap_cleanup_omv_only_v1.0.sh
 PROJECT: SEED_MOVER
 
 [ROLE]
-- Étape de nettoyage ciblée pour l’hôte OMV : supprime localement les fichiers source déjà migrés vers Synology lorsque le plan indique qu’ils sont hardlinkés et validés à 100 % dans qBittorrent.
-- Empêche l’accumulation de doublons sur les volumes locaux en ne conservant que les copies Synology, après vérification croisée du hash et de l’état qBittorrent.
+- Étape terminale du pipeline synomap, dédiée exclusivement à l’hôte OMV.
+- Supprime les fichiers source locaux lorsqu’ils sont confirmés :
+  • hardlinkés sur le volume Synology,
+  • présents dans qBittorrent avec progress=100 %,
+  • stockés dans un save_path Synology valide,
+  • listés comme migrés dans le plan issu de daily/apply.
+- Évite la duplication locale inutile et réduit l’empreinte disque sur OMV.
 
 [CONTEXT]
-- Exécution manuelle ou orchestrée depuis la chaîne synomap, sur le serveur OMV où résident les fichiers /srv/dev-disk-by-uuid-... et où qBittorrent tourne.
-- Dépendances : /bin/sh, curl, sed, stat, rm, jq (optionnel mais utilisé pour extraire save_path/progress), mkdir n’est pas requis.
-- Charge SYNO_ENV au lancement afin de récupérer QB_URL/QB_USER/QB_PASS et OMV_DATA (préfixe des chemins locaux autorisés).
-- Consomme un plan identique à celui produit par daily_qbittorrent_update et parcouru par apply_from_plan.
-- Dialogue avec qBittorrent (si credentials disponibles) pour vérifier que le torrent est stocké sur /syno et que progress=100 %.
+- À exécuter manuellement ou via l’orchestrateur synomap_chain_preview.
+- Dépendances : /bin/sh, curl, sed, stat, rm ; jq recommandé (fallback possible si absent).
+- Nécessite un environnement cohérent : OMV_DATA, SYNO_ENV contenant QB_URL/QB_USER/QB_PASS.
+- Le script ne modifie ni qBittorrent ni Synology ; il ne travaille qu’en local sur OMV.
+- Basé sur un plan généré par daily/apply, utilisant les mêmes conventions de lignes "plan: ...".
 
 [INPUTS]
-- Paramètres CLI : [--write] <plan>. Sans --write, le script est en mode preview (echo des rm) ; avec --write il supprime réellement les SRC.
+- CLI :
+  - <plan_file> : obligatoire, fichier texte listant les actions possibles.
+  - --write     : active les suppressions réelles. Sans cela → mode preview (echo des rm).
 - Variables d’environnement :
-  - SYNO_ENV : injecte QB_URL/QB_USER/QB_PASS et OMV_DATA.
-  - OMV_DATA : préfixe obligatoire pour considérer un fichier comme local/supprimable (défaut /srv/dev-disk-by-uuid-).
-  - QB_URL/QB_USER/QB_PASS : nécessaires pour interroger qBittorrent ; si absents, aucune suppression n’est validée.
-- Format du plan : parse les blocs hash + plan: ln via sed, ignore ceux marqués SKIP ou [NOSTAT].
+  - SYNO_ENV   : fichier .env injectant OMV_DATA et les credentials qBittorrent.
+  - OMV_DATA   : préfixe requis pour considérer un chemin comme local. Défaut : /srv/dev-disk-by-uuid-
+  - QB_URL     : URL API qBittorrent (obligatoire pour validation complète).
+  - QB_USER    : identifiant API qBittorrent.
+  - QB_PASS    : mot de passe API qBittorrent.
+- Format du plan :
+  - lignes issues du daily/apply ;
+  - parse des blocs hash via sed ;
+  - ignore SKIP / [NOSTAT] / lignes incomplètes.
 
 [OUTPUTS]
-- PREVIEW : imprime "rm -- 'SRC'" pour chaque fichier admissible.
-- WRITE : exécute rm -f -- SRC et loggue "RM -- SRC" ; en cas d’échec rm, affiche [WARN].
-- Aucun fichier log n’est produit ; sortie uniquement sur stdout.
+- Mode PREVIEW :
+  - imprime : `rm -- 'SRC'` lorsque toutes les conditions sont validées.
+- Mode WRITE :
+  - exécute rm -f -- SRC puis affiche :
+      RM -- SRC
+  - affiche [WARN] si rm échoue.
+- Aucun fichier log ; sortie exclusive sur stdout.
+- Ne modifie pas mapping_entries.txt ; n’écrit aucun .state.
+
+[VALIDATION LOGIQUE]
+Pour chaque entrée du plan :
+ 1) ok_hardlink :
+    - compare hash/chemin issus du plan ;
+    - stat chemin Synology ; valide si inode identique ou hash conforme.
+ 2) ok_qb_100_syno :
+    - interroge qBittorrent :
+        save_path doit commencer par /syno
+        progress == 1.0
+    - si QB_* absent → toujours faux (aucune suppression).
+ 3) is_omv_local :
+    - SRC doit commencer par OMV_DATA
+ 4) Si les trois conditions ↑ sont vraies → admissible.
 
 [FAILURE_MODES]
-- PLAN non fourni → message d’usage et exit 2.
-- PLAN introuvable → set -e arrête immédiatement (exit ≠ 0).
-- Login qBittorrent impossible → le script continue mais ok_qb_100_syno renvoie faux, donc aucune suppression n’est effectuée.
-- Conditions de validation non réunies :
-  - ok_hardlink (stat) échoue → [SKIP] hash.
-  - ok_qb_100_syno (progress <100 ou save_path hors /syno) échoue → [SKIP].
-  - is_omv_local (chemin hors OMV_DATA) échoue → [SKIP].
-- rm -f peut échouer (droits, verrou) → [WARN] mais le script poursuit.
-- Exit code = 0 sauf erreur initiale (argument manquant ou plan absent).
+- Aucun plan fourni → affiche usage + exit 2.
+- Plan introuvable → exit ≠ 0 (set -e).
+- Échec login qBittorrent → ok_qb_100_syno=0 → aucune suppression.
+- Conditions non remplies → lignes ignorées, avec tags SKIP.
+- rm peut échouer → [WARN] mais le script continue.
+- Exit code global = 0 hors erreur initiale (arguments/plan manquants).
+
+[OBSERVATIONS & LIMITES]
+- Sans jq, extraction du progress/save_path devient fragile (sed/grep fallback partiel).
+- Le script ne protège pas les suppressions simultanées (pas de lockdir).
+- Aucune vérification de cohérence avec mapping_entries.txt ; dépend entièrement du plan.
+- L’absence de log fichier peut compliquer l’audit a posteriori (stdout uniquement).
 
 [HISTORIQUE]
-- Version 1.0 conçue pour l’étape OMV seulement, alignée avec la chaîne synomap preview/cleanup (2024-2025).
-- La présence de REGLAGES_CHATGPT dans le header suggère un portage récent vers l’infrastructure seed_mover.
-- À COMPLÉTER via historique Git pour dater l’ajout du mode --write et des vérifications qBittorrent.
+- Version initiale (1.0), 2024–2025, conçue pour compléter le pipeline synomap.
+- Ajout des validations qBittorrent (progress/save_path) dans les versions récentes.
+- Mention REGLAGES_CHATGPT indique une réintégration et durcissement récents (2025).
+- Date exacte d’introduction du flag --write à confirmer via historique Git.
